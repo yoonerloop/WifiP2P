@@ -1,0 +1,443 @@
+    WifiP2P是在 Android 4.0 以上系统中加入的功能，通过WifiP2P可以在不连接网络的情况下，直接与配对的设备进行数据交
+换。他相比蓝牙传输速率更快，更远；相比网络传输过程中不会消耗流量。WifiP2P的传输依赖于无限WiFi，因此设备之间通信需要
+连接同一个WiFi网络。在WifiP2P技术中有一个核心类WifiP2pManager，他提供了所有的通信相关的广播信息，监听信息，设备信息
+以及初始化操作等。在信息传输过程中需要有个接收端接收信息和发送端发送信息，这里称为客户端和服务端，客户端和服务端通过
+WifiP2P作为传输手段，通过socket作为信息载体，进行通信。
+
+    实现的效果如下所示：
+
+客户端
+
+图
+
+服务端
+
+图
+
+    现在一步步来实现它，进一步揭开WifiP2P神秘的面纱。
+
+一、权限申请
+
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+
+     需要注意的是由于传输过程中用到socket技术，所以需要添加网络权限，传输过程中是不需要消耗流量的。在清单文件中注册的
+权限中读写文件的权限是敏感权限，在6.0以上的系统上无效，因此需要额外动态注册权限，在这里使用easypermissions开源的权限
+管理框架进行管理，在gradle中引入：
+
+    compile 'pub.devrel:easypermissions:1.1.0'
+
+    然后在需要申请权限的地方进行注册权限，这里需要动态注册两个权限Manifest.permission.WRITE_EXTERNAL_STORAGE,
+Manifest.permission.READ_EXTERNAL_STORAGE。具体的注册方法这里不再详细介绍。
+
+二、WifiP2P的初始化
+
+   WifiP2P的初始化需要用到WifiP2pManager:
+   WifiP2pManager wifiP2pManager = (WifiP2pManager) getSystemService(Context.WIFI_P2P_SERVICE);
+   WifiP2pManager.Channel channel = wifiP2pManager.initialize(this, getMainLooper(), this);
+
+三、注册广播
+
+    与 WifiP2P相关的广播有以下几个：
+
+    WIFI_P2P_STATE_CHANGED_ACTION //用于指示WifiP2P是否可用
+    WIFI_P2P_PEERS_CHANGED_ACTION //peers列表发生变化
+    WIFI_P2P_CONNECTION_CHANGED_ACTION //WifiP2P的连接状态发生了改变
+    WIFI_P2P_THIS_DEVICE_CHANGED_ACTION //本设备的设备信息发生了变化
+
+    当客户端接收到广播时候许需要创建BroadcastReceiver进行广播信息，在onReceive里面进行接收广播信息，在app开启的时
+候我们进行动态的注册广播，这样客户端和服务端都能收到广播信息。因此创建一个基类的BaseActivity，进行注册广播:
+
+    Wifip2pReceiver mWifip2pReceiver = new Wifip2pReceiver(mWifiP2pManager, mChannel, this);
+    IntentFilter intentFilter = new IntentFilter();
+    intentFilter.addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION);
+    intentFilter.addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION);
+    intentFilter.addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION);
+    intentFilter.addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION);
+    registerReceiver(mWifip2pReceiver, intentFilter);
+
+    广播onReceive中获取的action状态比较多，有设备是否可用、是否连接、设备列表等等，在这写一个回调接口，将信息返回到对应的
+Activity上，在Activity上面实现监听并且在Wifip2pReceiver构造方法中对接口进行初始化操作。
+
+    public interface Wifip2pActionListener extends WifiP2pManager.ChannelListener {
+
+        void wifiP2pEnabled(boolean enabled);
+
+        void onConnection(WifiP2pInfo wifiP2pInfo);
+
+        void onDisconnection();
+
+        void onDeviceInfo(WifiP2pDevice wifiP2pDevice);
+
+        void onPeersInfo(Collection<WifiP2pDevice> wifiP2pDeviceList);
+
+    }
+
+    public Wifip2pReceiver(WifiP2pManager wifiP2pManager, WifiP2pManager.Channel channel,
+                           Wifip2pActionListener listener) {
+        mWifiP2pManager= wifiP2pManager;
+        mChannel= channel;
+        mListener = listener;
+    }
+
+    1、WiFiP2P是否可用，通过wifiP2pEnabled进行设置
+    case WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION:
+        if (state == WifiP2pManager.WIFI_P2P_STATE_ENABLED) {
+            mListener.wifiP2pEnabled(true);
+        } else {
+            mListener.wifiP2pEnabled(false);
+        }
+        break;
+
+    2、peers列表发生变化，可以通过 requestPeers 方法得到可用的设备列表，可以对列表中的某个设备进行连接
+    case WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION:
+      mWifiP2pManager.requestPeers(mChannel, new WifiP2pManager.PeerListListener() {
+          @Override
+          public void onPeersAvailable(WifiP2pDeviceList peers) {
+              mListener.onPeersInfo(peers.getDeviceList());
+          }
+      });
+      break;
+
+    3、WiFP2P连接发生变化，可以通过WifiP2pManager.requestConnectionInfo方法获取到设备是否连接
+    case WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION:
+      NetworkInfo networkInfo = intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO);
+      if (networkInfo.isConnected()){
+          mWifiP2pManager.requestConnectionInfo(mChannel, new WifiP2pManager.ConnectionInfoListener() {
+              @Override
+              public void onConnectionInfoAvailable(WifiP2pInfo info) {
+                  mListener.onConnection(info);
+              }
+          });
+      }else {
+          mListener.onDisconnection();
+      }
+      break;
+
+    4、WiFiP2P设备信息发生变化时候，通过intent获取到设备信息
+    case WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION:
+      WifiP2pDevice device = intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE);
+      mListener.onDeviceInfo(device);
+      break;
+
+    以上为整个广播接收者的内容代码，在广播中监听到回调信息，我们让基类的Activity实现这个接口，以便于处理回调信息。
+加上上面注册广播和初始化信息，所以基类的BaseActivity代码如下：
+
+    public class BaseActivity extends AppCompatActivity implements Wifip2pActionListener {
+
+        private static final String TAG = "BaseActivity";
+
+        public WifiP2pManager mWifiP2pManager;
+        public WifiP2pManager.Channel mChannel;
+        public Wifip2pReceiver mWifip2pReceiver;
+        public WifiP2pInfo mWifiP2pInfo;
+
+        @Override
+        protected void onCreate(Bundle savedInstanceState) {
+            super.onCreate(savedInstanceState);
+            //注册WifiP2pManager
+            mWifiP2pManager = (WifiP2pManager) getSystemService(Context.WIFI_P2P_SERVICE);
+            mChannel = mWifiP2pManager.initialize(this, getMainLooper(), this);
+
+            //注册广播
+            mWifip2pReceiver = new Wifip2pReceiver(mWifiP2pManager, mChannel, this);
+            IntentFilter intentFilter = new IntentFilter();
+            intentFilter.addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION);
+            intentFilter.addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION);
+            intentFilter.addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION);
+            intentFilter.addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION);
+            registerReceiver(mWifip2pReceiver, intentFilter);
+        }
+
+        @Override
+        protected void onDestroy() {
+            super.onDestroy();
+            //注销广播
+            unregisterReceiver(mWifip2pReceiver);
+            mWifip2pReceiver = null;
+        }
+
+
+        @Override
+        public void wifiP2pEnabled(boolean enabled) {
+            Log.e(TAG, "传输通道是否可用：" + enabled);
+        }
+
+        @Override
+        public void onConnection(WifiP2pInfo wifiP2pInfo) {
+            if (wifiP2pInfo != null) {
+                mWifiP2pInfo = wifiP2pInfo;
+                Log.e(TAG, "WifiP2pInfo:" + wifiP2pInfo);
+            }
+        }
+
+        @Override
+        public void onDisconnection() {
+            Log.e(TAG, "连接断开");
+        }
+
+        @Override
+        public void onDeviceInfo(WifiP2pDevice wifiP2pDevice) {
+            Log.e(TAG, "当前的的设备名称" + wifiP2pDevice.deviceName);
+        }
+        @Override
+        public void onPeersInfo(Collection<WifiP2pDevice> wifiP2pDeviceList) {
+            for (WifiP2pDevice device : wifiP2pDeviceList) {
+                Log.e(TAG, "连接的设备信息：" + device.deviceName + "--------" + device.deviceAddress);
+            }
+        }
+
+        @Override
+        public void onChannelDisconnected() {
+
+        }
+    }
+
+四、客户端创建
+
+    创建一个SendFileActivity作为客户端的Activity，继承自BaseActivity，作为客户端。客户端发送信息到服务端，服务端
+需要提供组群信息，供客户端连接，关于服务端组群信息之后会有处理，这里先知道如何搜索服务端设备，然后配对连接，连接成功后
+就可以把所需要传输的文件信息以socket的形式发送给服务端，服务端监听socket端口，获取信息流，写入文件，这就是整个传输
+信息中客户端和服务端的交互过程。按照这样的步骤，客户端需要实现以下几点：
+
+    1、搜索设备信息
+    2、选择设备连接服务端组群信息
+    3、选择要传输的文件路径
+    4、把该文件通过socket发送到服务端
+
+    我们就按照这四点一步步实现：
+
+    1、搜索设备信息
+
+    通过mWifiP2pManager的discoverPeers方法进行搜索，有搜索成功和搜索失败的回调，搜索到设备时候会触发
+WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION 广播，此时就可以调用 requestPeers 方法获取设备列表信息，
+在回调方法onPeersInfo中可以得到设备信息。
+    mWifiP2pManager.discoverPeers(mChannel, new WifiP2pManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+                Log.e(TAG, "搜索设备成功");
+            }
+
+            @Override
+            public void onFailure(int reasonCode) {
+                Log.e(TAG, "搜索设备失败");
+            }
+        });
+
+     2、选择设备连接服务端组群信息
+
+     搜索到的设备信息肯能不止一个，所以需要选择一个设备进行连接，当选择好设备之后，手动调用mWifiP2pManager.connect
+方法，进行设备连接，会触发WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION的广播，收到连接成功和失败的回调，在回
+到中可以得到WifiP2pInfo信息。
+
+    WifiP2pConfig config = new WifiP2pConfig();
+    if (wifiP2pDevice != null) {
+        //需要将address,WpsInfo.PBC信息包装成WifiP2pConfig
+        config.deviceAddress = wifiP2pDevice.deviceAddress;
+        config.wps.setup = WpsInfo.PBC;
+        mWifiP2pManager.connect(mChannel, config, new WifiP2pManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+                Log.e(TAG, "连接成功");
+                Toast.makeText(SendFileActivity.this, "连接成功", Toast.LENGTH_SHORT).show();
+            }
+
+            @Override
+            public void onFailure(int reason) {
+                Log.e(TAG, "连接失败");
+                Toast.makeText(SendFileActivity.this, "连接失败", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    3、选择要传输的文件
+
+   指的是sd卡的文件路径，如下跳转到文件管理，进行选择：
+   Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+   intent.setType("*/*");
+   intent.addCategory(Intent.CATEGORY_OPENABLE);
+   startActivityForResult(intent, 10);
+
+   对于文件封装成FileBean，封装为三个参数：路径、文件大小、文件的MD5，如下：
+
+   public class FileBean implements Serializable{
+
+       public static final String serialVersionUID = "6321689524634663223356";
+
+       public String filePath;
+
+       public long fileLength;
+
+       //MD5码：保证文件的完整性
+       public String md5;
+
+       public FileBean(String filePath, long fileLength, String md5) {
+           this.filePath = filePath;
+           this.fileLength = fileLength;
+           this.md5 = md5;
+       }
+   }
+
+    选择好之后会回调onActivityResult方法，可以在这里进行判断：
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == 10) {
+            if (resultCode == RESULT_OK) {
+                Uri uri = data.getData();
+                if (uri != null) {
+                    String path = FileUtils.getAbsolutePath(this, uri);
+                    if (path != null) {
+                        final File file = new File(path);
+                        if (!file.exists() || mWifiP2pInfo == null) {
+                            Toast.makeText(SendFileActivity.this,"文件路径找不到",Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        String md5 = Md5Util.getMd5(file);
+                        FileBean fileBean = new FileBean(file.getPath(), file.length(), md5);
+                        String hostAddress = mWifiP2pInfo.groupOwnerAddress.getHostAddress();
+                        new SendTask(SendFileActivity.this, fileBean).execute(hostAddress);
+                    }
+                }
+            }
+        }
+    }
+
+    4、把该文件通过socket发送到服务端
+
+    获取到文件后，就可以通过socket发送文件到服务端，在创建socket的时候需要ip，ip地址可以从WifiP2pInfo获取到，
+WifiP2pInfo在回调方法中可以获取到，当设备连接上的时候会触发这个回调，在这里进行了初始化WifiP2pInfo。
+    socket的发送是需要操作IO流的，比较耗时的操作，这里使用AsyncTask在子线程里面进行操作。同时为了监听读取进度，读
+取完成等情况，来跟新UI进度条，需要定义发送回调接口如下：
+
+        public interface ProgressSendListener {
+
+            //当传输进度发生变化时
+            void onProgressChanged(File file, int progress);
+
+            //当传输结束时
+            void onFinished(File file);
+
+            //传输失败时
+            void onFaliure(File file);
+        }
+
+    回调接口在socket的操作中进行设置回调数据，关于socket的完整代码如下：
+
+    public class SendSocket {
+
+        public static final String TAG = "SendSocket";
+        public static final int PORT = 10000;
+        private FileBean mFileBean;
+        private String mAddress;
+        private File mFile;
+        private ProgressSendListener mlistener;
+
+        private Handler mHandler = new Handler(Looper.getMainLooper()) {
+
+            @Override
+            public void handleMessage(Message msg) {
+                super.handleMessage(msg);
+                switch (msg.what) {
+                    case 10:
+                        int progress = (int) msg.obj;
+                        if (mlistener != null) {
+                            mlistener.onProgressChanged(mFile, progress);
+                        }
+                        break;
+                    case 20:
+                        if (mlistener != null) {
+                            mlistener.onFinished(mFile);
+                        }
+                        break;
+                    case 30:
+                        if (mlistener != null) {
+                            mlistener.onFaliure(mFile);
+                        }
+                        break;
+                }
+            }
+        };
+
+        public SendSocket(FileBean fileBean, String address, ProgressSendListener listener) {
+            mFileBean = fileBean;
+            mAddress = address;
+            mlistener = listener;
+        }
+
+        public void createSendSocket() {
+            try {
+                Socket socket = new Socket();
+                InetSocketAddress inetSocketAddress = new InetSocketAddress(mAddress, PORT);
+                socket.connect(inetSocketAddress);
+                OutputStream outputStream = socket.getOutputStream();
+                ObjectOutputStream objectOutputStream = new ObjectOutputStream(outputStream);
+                objectOutputStream.writeObject(mFileBean);
+                mFile = new File(mFileBean.filePath);
+                FileInputStream inputStream = new FileInputStream(mFile);
+                long size = mFileBean.fileLength;
+                long total = 0;
+                byte bytes[] = new byte[1024];
+                int len;
+                while ((len = inputStream.read(bytes)) != -1) {
+                    outputStream.write(bytes, 0, len);
+                    total += len;
+                    int progress = (int) ((total * 100) / size);
+                    Log.e(TAG, "文件发送进度：" + progress);
+                    Message message = Message.obtain();
+                    message.what = 10;
+                    message.obj = progress;
+                    mHandler.sendMessage(message);
+                }
+                outputStream.close();
+                objectOutputStream.close();
+                inputStream.close();
+                socket.close();
+                mHandler.sendEmptyMessage(20);
+                Log.e(TAG, "文件发送成功");
+            } catch (Exception e) {
+                mHandler.sendEmptyMessage(30);
+                Log.e(TAG, "文件发送异常");
+            }
+        }
+    }
+
+    设置好回调信息后，让AsyncTask实现该接口，更新UI，核心代码如下：
+
+    @Override
+    protected Void doInBackground(String... strings) {
+        mSendSocket = new SendSocket(mFileBean, strings[0], this);
+        mSendSocket.createSendSocket();
+        return null;
+    }
+
+    就这样客户端的功能完成。
+
+五、服务端创建
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
